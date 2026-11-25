@@ -1,0 +1,50 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+out/
+bin/
+
+# Compiled objects and binaries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+*.pdb
+*.ilk
+*.exp
+nanobook_tests
+nanobook_bench
+nanobook_demo
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+
+# IDE / editor
+.vscode/
+.idea/
+.vs/
+*.sln
+*.vcxproj*
+*.suo
+*.user
+*.swp
+*~
+.cache/
+.clangd/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

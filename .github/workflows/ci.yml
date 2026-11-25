@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-bench:
+    name: g++ build, tests & benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: g++ --version
+
+      - name: Build (g++ -std=c++20 -O3, warnings as errors)
+        run: make -j"$(nproc)" all CXX=g++
+
+      - name: Unit tests
+        run: make test
+
+      - name: Visualizer snapshot
+        run: ./build/nanobook_demo --frames 1 --no-color
+
+      - name: Benchmark sanity check (200k orders)
+        run: ./build/nanobook_bench 200000
+
+  cmake:
+    name: CMake build & ctest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
+
+      - name: Build
+        run: cmake --build build-cmake -j"$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build-cmake --output-on-failure
