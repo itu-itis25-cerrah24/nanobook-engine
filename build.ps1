@@ -19,9 +19,10 @@ New-Item -ItemType Directory -Force build | Out-Null
 Write-Host '[build] library'
 Invoke-Compiler @('-c', 'src/order_book.cpp', '-o', 'build/order_book.o')
 Write-Host '[build] tests'
-Invoke-Compiler @('tests/test_order_book.cpp', 'build/order_book.o', '-o', 'build/nanobook_tests.exe')
+$testSources = Get-ChildItem tests -Filter *.cpp | ForEach-Object { "tests/$($_.Name)" }
+Invoke-Compiler (@($testSources) + @('build/order_book.o', '-pthread', '-o', 'build/nanobook_tests.exe'))
 Write-Host '[build] benchmark'
-Invoke-Compiler @('-march=native', 'benchmarks/bench_latency.cpp', 'build/order_book.o', '-o', 'build/nanobook_bench.exe')
+Invoke-Compiler @('-march=native', 'benchmarks/bench_latency.cpp', 'build/order_book.o', '-pthread', '-o', 'build/nanobook_bench.exe')
 Write-Host '[build] demo'
 Invoke-Compiler @('demo/nanobook_demo.cpp', 'build/order_book.o', '-o', 'build/nanobook_demo.exe')
 

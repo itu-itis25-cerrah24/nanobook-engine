@@ -7,13 +7,25 @@ namespace nanobook {
 namespace {
 
 constexpr ExecResult rejected(RejectReason reason) noexcept {
-    return ExecResult{OrderStatus::Rejected, reason, 0, 0, 0};
+    ExecResult r;
+    r.status = OrderStatus::Rejected;
+    r.reason = reason;
+    return r;
+}
+
+constexpr bool stp_active(OrderOptions opts) noexcept {
+    return opts.trader_id != kNoTrader && opts.stp != STPMode::None;
+}
+
+constexpr bool crosses(Side taker, Price limit, Price level_price) noexcept {
+    return taker == Side::Buy ? level_price <= limit : level_price >= limit;
 }
 
 }  // namespace
 
 OrderBook::OrderBook(std::size_t expected_orders) : pool_(expected_orders) {
     index_.reserve(expected_orders);
+    stp_cancelled_.reserve(64);
 }
 
 // ---------------------------------------------------------------------------
@@ -21,51 +33,104 @@ OrderBook::OrderBook(std::size_t expected_orders) : pool_(expected_orders) {
 // ---------------------------------------------------------------------------
 
 ExecResult OrderBook::submit(const OrderRequest& req, std::vector<Trade>& trades) {
+    const OrderOptions opts{req.trader_id, req.stp};
     switch (req.type) {
-        case OrderType::Limit:  return add_limit(req.id, req.side, req.price, req.qty, trades);
-        case OrderType::Market: return add_market(req.id, req.side, req.qty, trades);
-        case OrderType::IOC:    return add_ioc(req.id, req.side, req.price, req.qty, trades);
+        case OrderType::Limit:  return add_limit(req.id, req.side, req.price, req.qty, trades, opts);
+        case OrderType::Market: return add_market(req.id, req.side, req.qty, trades, opts);
+        case OrderType::IOC:    return add_ioc(req.id, req.side, req.price, req.qty, trades, opts);
+        case OrderType::FOK:    return add_fok(req.id, req.side, req.price, req.qty, trades, opts);
     }
     return rejected(RejectReason::InvalidPrice);
 }
 
 ExecResult OrderBook::add_limit(OrderId id, Side side, Price price, Quantity qty,
-                                std::vector<Trade>& trades) {
+                                std::vector<Trade>& trades, OrderOptions opts) {
+    stp_cancelled_.clear();
     if (qty <= 0) return rejected(RejectReason::InvalidQuantity);
     if (price <= 0) return rejected(RejectReason::InvalidPrice);
     if (index_.contains(id)) return rejected(RejectReason::DuplicateOrderId);
 
-    const Quantity filled    = execute(id, side, price, /*priced=*/true, qty, trades);
-    const Quantity remaining = qty - filled;
+    const MatchOutcome m         = execute(id, side, price, /*priced=*/true, qty, opts, trades);
+    const Quantity     remaining = qty - m.filled;
 
-    if (remaining == 0) return ExecResult{OrderStatus::Filled, RejectReason::None, filled, 0, 0};
+    ExecResult r;
+    r.filled      = m.filled;
+    r.stp_cancels = stp_count();
 
-    rest(id, side, price, remaining);
-    const OrderStatus status = filled > 0 ? OrderStatus::PartiallyFilled : OrderStatus::Resting;
-    return ExecResult{status, RejectReason::None, filled, remaining, 0};
+    if (remaining == 0) {
+        r.status = OrderStatus::Filled;
+    } else if (m.self_trade_stop) {
+        // CancelNewest: the remainder must not rest opposite the trader's own order.
+        r.status        = OrderStatus::Cancelled;
+        r.cancelled     = remaining;
+        r.cancel_reason = CancelReason::SelfTrade;
+    } else {
+        rest(id, side, price, remaining, opts);
+        r.status  = m.filled > 0 ? OrderStatus::PartiallyFilled : OrderStatus::Resting;
+        r.resting = remaining;
+    }
+    return r;
 }
 
-ExecResult OrderBook::add_market(OrderId id, Side side, Quantity qty, std::vector<Trade>& trades) {
+ExecResult OrderBook::add_market(OrderId id, Side side, Quantity qty, std::vector<Trade>& trades,
+                                 OrderOptions opts) {
+    stp_cancelled_.clear();
     if (qty <= 0) return rejected(RejectReason::InvalidQuantity);
-    return execute_immediate(id, side, 0, /*priced=*/false, qty, trades);
+    return execute_immediate(id, side, 0, /*priced=*/false, qty, opts, trades);
 }
 
 ExecResult OrderBook::add_ioc(OrderId id, Side side, Price price, Quantity qty,
-                              std::vector<Trade>& trades) {
+                              std::vector<Trade>& trades, OrderOptions opts) {
+    stp_cancelled_.clear();
     if (qty <= 0) return rejected(RejectReason::InvalidQuantity);
     if (price <= 0) return rejected(RejectReason::InvalidPrice);
-    return execute_immediate(id, side, price, /*priced=*/true, qty, trades);
+    return execute_immediate(id, side, price, /*priced=*/true, qty, opts, trades);
+}
+
+ExecResult OrderBook::add_fok(OrderId id, Side side, Price price, Quantity qty,
+                              std::vector<Trade>& trades, OrderOptions opts) {
+    stp_cancelled_.clear();
+    if (qty <= 0) return rejected(RejectReason::InvalidQuantity);
+    if (price <= 0) return rejected(RejectReason::InvalidPrice);
+    if (index_.contains(id)) return rejected(RejectReason::DuplicateOrderId);
+
+    const bool fillable = side == Side::Buy ? can_fill(asks_, side, price, qty, opts)
+                                            : can_fill(bids_, side, price, qty, opts);
+    ExecResult r;
+    if (!fillable) {
+        r.status        = OrderStatus::Cancelled;
+        r.cancelled     = qty;
+        r.cancel_reason = CancelReason::FOKUnfillable;
+        return r;
+    }
+
+    // The pre-check guarantees a complete fill.
+    const MatchOutcome m = execute(id, side, price, /*priced=*/true, qty, opts, trades);
+    r.status      = OrderStatus::Filled;
+    r.filled      = m.filled;
+    r.stp_cancels = stp_count();
+    return r;
 }
 
 ExecResult OrderBook::execute_immediate(OrderId id, Side side, Price limit, bool priced,
-                                        Quantity qty, std::vector<Trade>& trades) {
+                                        Quantity qty, OrderOptions opts,
+                                        std::vector<Trade>& trades) {
     // Ids must be unique against resting orders so trade reports stay unambiguous.
     if (index_.contains(id)) return rejected(RejectReason::DuplicateOrderId);
 
-    const Quantity filled    = execute(id, side, limit, priced, qty, trades);
-    const Quantity cancelled = qty - filled;
-    const OrderStatus status = cancelled == 0 ? OrderStatus::Filled : OrderStatus::Cancelled;
-    return ExecResult{status, RejectReason::None, filled, 0, cancelled};
+    const MatchOutcome m = execute(id, side, limit, priced, qty, opts, trades);
+
+    ExecResult r;
+    r.filled      = m.filled;
+    r.cancelled   = qty - m.filled;
+    r.stp_cancels = stp_count();
+    if (r.cancelled == 0) {
+        r.status = OrderStatus::Filled;
+    } else {
+        r.status        = OrderStatus::Cancelled;
+        r.cancel_reason = m.self_trade_stop ? CancelReason::SelfTrade : CancelReason::NoLiquidity;
+    }
+    return r;
 }
 
 bool OrderBook::cancel(OrderId id) {
@@ -81,6 +146,7 @@ bool OrderBook::cancel(OrderId id) {
 
 ExecResult OrderBook::modify(OrderId id, Price new_price, Quantity new_qty,
                              std::vector<Trade>& trades) {
+    stp_cancelled_.clear();
     if (new_qty <= 0) return rejected(RejectReason::InvalidQuantity);
     if (new_price <= 0) return rejected(RejectReason::InvalidPrice);
 
@@ -94,70 +160,106 @@ ExecResult OrderBook::modify(OrderId id, Price new_price, Quantity new_qty,
     if (new_price == node.price && new_qty <= node.qty) {
         node.level->total_qty -= node.qty - new_qty;
         node.qty = new_qty;
-        return ExecResult{OrderStatus::Resting, RejectReason::None, 0, new_qty, 0};
+        ExecResult r;
+        r.status  = OrderStatus::Resting;
+        r.resting = new_qty;
+        return r;
     }
 
     // Anything else is cancel/replace: priority is lost and the order may trade.
-    const Side side = node.side;
+    const Side         side = node.side;
+    const OrderOptions opts{node.trader, node.stp};
     index_.erase(it);
     unlink(idx);
     pool_.release(idx);
-    return add_limit(id, side, new_price, new_qty, trades);
+    return add_limit(id, side, new_price, new_qty, trades, opts);
 }
 
 // ---------------------------------------------------------------------------
 // Matching
 // ---------------------------------------------------------------------------
 
-Quantity OrderBook::execute(OrderId taker, Side side, Price limit, bool priced, Quantity qty,
-                            std::vector<Trade>& trades) {
-    return side == Side::Buy ? sweep(asks_, taker, side, limit, priced, qty, trades)
-                             : sweep(bids_, taker, side, limit, priced, qty, trades);
+OrderBook::MatchOutcome OrderBook::execute(OrderId taker, Side side, Price limit, bool priced,
+                                           Quantity qty, OrderOptions opts,
+                                           std::vector<Trade>& trades) {
+    return side == Side::Buy ? sweep(asks_, taker, side, limit, priced, qty, opts, trades)
+                             : sweep(bids_, taker, side, limit, priced, qty, opts, trades);
 }
 
 template <class Book>
-Quantity OrderBook::sweep(Book& book, OrderId taker, Side side, Price limit, bool priced,
-                          Quantity qty, std::vector<Trade>& trades) {
-    Quantity remaining = qty;
+OrderBook::MatchOutcome OrderBook::sweep(Book& book, OrderId taker, Side side, Price limit,
+                                         bool priced, Quantity qty, OrderOptions opts,
+                                         std::vector<Trade>& trades) {
+    const bool stp       = stp_active(opts);
+    Quantity   remaining = qty;
+    bool       stopped   = false;
 
-    while (remaining > 0 && !book.empty()) {
+    while (remaining > 0 && !stopped && !book.empty()) {
         const auto  level_it = book.begin();
         PriceLevel& level    = level_it->second;
 
-        if (priced) {
-            const bool crosses = side == Side::Buy ? level.price <= limit : level.price >= limit;
-            if (!crosses) break;
-        }
+        if (priced && !crosses(side, limit, level.price)) break;
 
         // Walk the FIFO queue from the oldest order.
         while (remaining > 0 && level.head != kNullNode) {
             const NodeIndex idx   = level.head;
             OrderNode&      maker = pool_[idx];
-            const Quantity  fill  = std::min(remaining, maker.qty);
 
+            if (stp && maker.trader == opts.trader_id) [[unlikely]] {
+                if (opts.stp == STPMode::CancelNewest) {
+                    stopped = true;
+                    break;
+                }
+                // CancelOldest: drop the trader's resting order and keep matching.
+                stp_cancelled_.push_back(maker.id);
+                level.total_qty -= maker.qty;
+                pop_head(level, idx);
+                continue;
+            }
+
+            const Quantity fill = std::min(remaining, maker.qty);
             trades.push_back(Trade{next_seq_++, taker, maker.id, side, level.price, fill});
 
             remaining       -= fill;
             maker.qty       -= fill;
             level.total_qty -= fill;
 
-            if (maker.qty == 0) {
-                level.head = maker.next;
-                if (level.head != kNullNode) {
-                    pool_[level.head].prev = kNullNode;
-                } else {
-                    level.tail = kNullNode;
-                }
-                --level.count;
-                index_.erase(maker.id);
-                pool_.release(idx);
-            }
+            if (maker.qty == 0) pop_head(level, idx);
         }
 
         if (level.head == kNullNode) book.erase(level_it);
     }
 
-    return qty - remaining;
+    return MatchOutcome{qty - remaining, stopped};
+}
+
+template <class Book>
+bool OrderBook::can_fill(const Book& book, Side side, Price limit, Quantity qty,
+                         OrderOptions opts) const {
+    const bool stp       = stp_active(opts);
+    Quantity   available = 0;
+
+    for (const auto& [price, level] : book) {
+        if (!crosses(side, limit, price)) return false;
+
+        if (!stp) {
+            available += level.total_qty;  // O(1) per level via the running total
+        } else {
+            // STP changes what is reachable, so walk the queue in priority order.
+            for (NodeIndex idx = level.head; idx != kNullNode; idx = pool_[idx].next) {
+                const OrderNode& maker = pool_[idx];
+                if (maker.trader == opts.trader_id) {
+                    // CancelNewest stops at the first own order; CancelOldest skips it.
+                    if (opts.stp == STPMode::CancelNewest) return available >= qty;
+                    continue;
+                }
+                available += maker.qty;
+                if (available >= qty) return true;
+            }
+        }
+        if (available >= qty) return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -171,11 +273,11 @@ PriceLevel& OrderBook::level_for(Book& book, Price price) {
     return it->second;
 }
 
-void OrderBook::rest(OrderId id, Side side, Price price, Quantity qty) {
+void OrderBook::rest(OrderId id, Side side, Price price, Quantity qty, OrderOptions opts) {
     PriceLevel& level = side == Side::Buy ? level_for(bids_, price) : level_for(asks_, price);
 
     const NodeIndex idx = pool_.allocate();
-    pool_[idx] = OrderNode{id, price, qty, &level, level.tail, kNullNode, side};
+    pool_[idx] = OrderNode{id, price, qty, &level, level.tail, kNullNode, opts.trader_id, side, opts.stp};
 
     if (level.tail != kNullNode) {
         pool_[level.tail].next = idx;
@@ -187,6 +289,19 @@ void OrderBook::rest(OrderId id, Side side, Price price, Quantity qty) {
     level.total_qty += qty;
 
     index_.emplace(id, idx);
+}
+
+void OrderBook::pop_head(PriceLevel& level, NodeIndex idx) {
+    const OrderNode& node = pool_[idx];
+    level.head = node.next;
+    if (level.head != kNullNode) {
+        pool_[level.head].prev = kNullNode;
+    } else {
+        level.tail = kNullNode;
+    }
+    --level.count;
+    index_.erase(node.id);
+    pool_.release(idx);  // overwrites node.next: must come last
 }
 
 void OrderBook::unlink(NodeIndex idx) {
@@ -266,7 +381,7 @@ std::optional<OrderView> OrderBook::find(OrderId id) const {
     const auto it = index_.find(id);
     if (it == index_.end()) return std::nullopt;
     const OrderNode& node = pool_[it->second];
-    return OrderView{node.id, node.side, node.price, node.qty};
+    return OrderView{node.id, node.side, node.price, node.qty, node.trader};
 }
 
 std::vector<OrderId> OrderBook::queue_at(Side side, Price price) const {

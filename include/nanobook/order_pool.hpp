@@ -18,14 +18,17 @@ struct PriceLevel;
 // price level's FIFO queue by index (intrusive doubly-linked list), so unlinking
 // an order is O(1) and never touches the allocator.
 struct OrderNode {
-    OrderId     id    = 0;
-    Price       price = 0;
-    Quantity    qty   = 0;  // open quantity
-    PriceLevel* level = nullptr;
-    NodeIndex   prev  = kNullNode;
-    NodeIndex   next  = kNullNode;
-    Side        side  = Side::Buy;
+    OrderId     id     = 0;
+    Price       price  = 0;
+    Quantity    qty    = 0;  // open quantity
+    PriceLevel* level  = nullptr;
+    NodeIndex   prev   = kNullNode;
+    NodeIndex   next   = kNullNode;
+    TraderId    trader = kNoTrader;
+    Side        side   = Side::Buy;
+    STPMode     stp    = STPMode::None;  // kept so a cancel/replace re-enters with the same mode
 };
+static_assert(sizeof(OrderNode) <= 48, "OrderNode should stay compact (<= 48 bytes)");
 
 // All orders resting at one price, in time priority (head = oldest).
 struct PriceLevel {

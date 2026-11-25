@@ -28,8 +28,37 @@ jobs:
       - name: Visualizer snapshot
         run: ./build/nanobook_demo --frames 1 --no-color
 
-      - name: Benchmark sanity check (200k orders)
+      - name: Benchmark sanity check (200k orders, single-thread + 2-thread SPSC pipeline)
         run: ./build/nanobook_bench 200000
+
+  sanitizers:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ThreadSanitizer
+            flags: -fsanitize=thread
+          - name: AddressSanitizer + UBSan
+            flags: -fsanitize=address,undefined -fno-sanitize-recover=all
+    steps:
+      - uses: actions/checkout@v4
+
+      # Newer runner kernels use 32 bits of mmap ASLR entropy, which TSan's shadow
+      # memory layout does not support.
+      - name: Reduce ASLR entropy for TSan
+        if: matrix.name == 'ThreadSanitizer'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Build tests
+        run: >
+          g++ -std=c++20 -O1 -g -fno-omit-frame-pointer ${{ matrix.flags }}
+          -Wall -Wextra -Werror -Iinclude
+          src/order_book.cpp tests/*.cpp -pthread -o nanobook_tests_san
+
+      - name: Run tests
+        run: ./nanobook_tests_san
 
   cmake:
     name: CMake build & ctest

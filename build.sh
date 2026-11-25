@@ -18,9 +18,9 @@ mkdir -p build
 echo "[build] library"
 $CXX $FLAGS -c src/order_book.cpp -o build/order_book.o
 echo "[build] tests"
-$CXX $FLAGS tests/test_order_book.cpp build/order_book.o -o build/nanobook_tests
+$CXX $FLAGS tests/*.cpp build/order_book.o -pthread -o build/nanobook_tests
 echo "[build] benchmark"
-$CXX $FLAGS -march=native benchmarks/bench_latency.cpp build/order_book.o -o build/nanobook_bench
+$CXX $FLAGS -march=native benchmarks/bench_latency.cpp build/order_book.o -pthread -o build/nanobook_bench
 echo "[build] demo"
 $CXX $FLAGS demo/nanobook_demo.cpp build/order_book.o -o build/nanobook_demo
 

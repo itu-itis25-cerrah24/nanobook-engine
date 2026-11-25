@@ -545,5 +545,3 @@ NB_TEST(trade_sequence_numbers_are_monotonic) {
     NB_CHECK_EQ(trades.size(), 6u);
     for (std::size_t i = 0; i < trades.size(); ++i) NB_CHECK_EQ(trades[i].seq, i + 1);
 }
-
-int main() { return nbtest::run_all(); }

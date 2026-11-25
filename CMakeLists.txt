@@ -17,16 +17,22 @@ elseif(MSVC)
     set(NANOBOOK_WARNINGS /W4 /WX)
 endif()
 
+find_package(Threads REQUIRED)
+
 add_library(nanobook STATIC src/order_book.cpp)
 target_include_directories(nanobook PUBLIC include)
 target_compile_options(nanobook PRIVATE ${NANOBOOK_WARNINGS})
 
-add_executable(nanobook_tests tests/test_order_book.cpp)
-target_link_libraries(nanobook_tests PRIVATE nanobook)
+add_executable(nanobook_tests
+    tests/test_main.cpp
+    tests/test_order_book.cpp
+    tests/test_exchange_features.cpp
+    tests/test_spsc_queue.cpp)
+target_link_libraries(nanobook_tests PRIVATE nanobook Threads::Threads)
 target_compile_options(nanobook_tests PRIVATE ${NANOBOOK_WARNINGS})
 
 add_executable(nanobook_bench benchmarks/bench_latency.cpp)
-target_link_libraries(nanobook_bench PRIVATE nanobook)
+target_link_libraries(nanobook_bench PRIVATE nanobook Threads::Threads)
 target_compile_options(nanobook_bench PRIVATE ${NANOBOOK_WARNINGS})
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(nanobook_bench PRIVATE -march=native)

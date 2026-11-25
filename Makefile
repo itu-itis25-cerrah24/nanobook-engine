@@ -2,6 +2,7 @@ CXX      ?= g++
 CXXFLAGS ?= -std=c++20 -O3 -DNDEBUG
 WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Wold-style-cast -Werror
 INCLUDES := -Iinclude
+LDFLAGS  ?= -pthread
 
 BUILD    := build
 LIB_SRC  := src/order_book.cpp
@@ -22,13 +23,15 @@ $(BUILD):
 $(LIB_OBJ): $(LIB_SRC) $(HEADERS) | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(WARNINGS) $(INCLUDES) -c $< -o $@
 
-$(TEST_BIN): tests/test_order_book.cpp tests/test_framework.hpp $(LIB_OBJ)
-	$(CXX) $(CXXFLAGS) $(WARNINGS) $(INCLUDES) tests/test_order_book.cpp $(LIB_OBJ) -o $@
+TEST_SRC := $(wildcard tests/*.cpp)
 
-$(BENCH_BIN): benchmarks/bench_latency.cpp $(LIB_OBJ)
-	$(CXX) $(CXXFLAGS) -march=native $(WARNINGS) $(INCLUDES) benchmarks/bench_latency.cpp $(LIB_OBJ) -o $@
+$(TEST_BIN): $(TEST_SRC) tests/test_framework.hpp $(HEADERS) $(LIB_OBJ)
+	$(CXX) $(CXXFLAGS) $(WARNINGS) $(INCLUDES) $(TEST_SRC) $(LIB_OBJ) $(LDFLAGS) -o $@
 
-$(DEMO_BIN): demo/nanobook_demo.cpp $(LIB_OBJ)
+$(BENCH_BIN): benchmarks/bench_latency.cpp $(HEADERS) $(LIB_OBJ)
+	$(CXX) $(CXXFLAGS) -march=native $(WARNINGS) $(INCLUDES) benchmarks/bench_latency.cpp $(LIB_OBJ) $(LDFLAGS) -o $@
+
+$(DEMO_BIN): demo/nanobook_demo.cpp $(HEADERS) $(LIB_OBJ)
 	$(CXX) $(CXXFLAGS) $(WARNINGS) $(INCLUDES) demo/nanobook_demo.cpp $(LIB_OBJ) -o $@
 
 test: $(TEST_BIN)
